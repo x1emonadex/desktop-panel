@@ -1,0 +1,14 @@
+# локальные данные приложения
+config.json
+state.json
+panel.log
+icons/
+
+# сборка
+Panel.exe
+__pycache__/
+*.pyc
+
+# система
+Thumbs.db
+desktop.ini
