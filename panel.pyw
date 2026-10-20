@@ -85,6 +85,7 @@ DEFAULTS = {
     "font_size": 9,
     "icon_size": 44,
     "hotkey": "ctrl+alt+space",
+    "keyboard": True,
 }
 
 
@@ -122,6 +123,14 @@ def load_config():
 
 
 CFG = load_config()
+
+
+def save_config():
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(CFG, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log("config save: %r" % (e,))
 
 
 # ---------------------------------------------------------------- state
@@ -868,6 +877,128 @@ class SettingsWindow:
         self.panel.restart()
 
 
+# ---------------------------------------------------------------- управление
+class ControlsWindow:
+    """Окно «Управление»: что делают клавиши, и выключатель клавиатуры."""
+
+    BG = "#16161A"
+    FG = "#E7E7EC"
+    DIM = "#8E8E99"
+    CARD = "#1E1E23"
+
+    def __init__(self, panel):
+        self.panel = panel
+        cfg = panel.cfg
+        self.win = tk.Toplevel(panel.root)
+        self.win.withdraw()
+        self.win.title("Панель — управление")
+        self.win.configure(bg=self.BG)
+        self.win.resizable(False, False)
+        try:
+            self.win.iconbitmap(os.path.join(APP_DIR, "app.ico"))
+        except Exception:
+            pass
+
+        font = panel.font
+        bold = tkfont.Font(family=cfg["font"], size=cfg["font_size"], weight="bold")
+        small = tkfont.Font(family=cfg["font"], size=max(7, cfg["font_size"] - 1))
+
+        w, pad = 520, 18
+        y = 14
+
+        self.sw = tk.Canvas(self.win, width=44, height=22, bg=self.BG,
+                            highlightthickness=0, bd=0, cursor="hand2")
+        self.sw.place(x=pad, y=y + 2)
+        kbd_lbl = tk.Label(self.win, text="Управление с клавиатуры", bg=self.BG,
+                           fg=self.FG, font=font, cursor="hand2")
+        kbd_lbl.place(x=pad + 56, y=y + 2)
+        for wdg in (self.sw, kbd_lbl):
+            wdg.bind("<Button-1>", lambda e: self.toggle_kbd())
+        self._draw_switch(bool(cfg.get("keyboard", True)))
+        y += 26
+        tk.Label(self.win, text="Панель открыта — можно ходить по вкладкам и плиткам без мыши",
+                 bg=self.BG, fg=self.DIM, font=small).place(x=pad + 56, y=y)
+        y += 30
+
+        hotkey = " + ".join(p.capitalize() for p in cfg.get("hotkey", "").split("+") if p) or "—"
+        sections = [
+            ("ЗАПУСК", [(hotkey, "открыть или закрыть панель"),
+                        ("Esc", "закрыть панель")]),
+            ("ВКЛАДКИ", [("A / D", "переключить вкладку"),
+                         ("← / →", "то же стрелками"),
+                         ("E", "спуститься к плиткам")]),
+            ("ПЛИТКИ", [("W A S D", "двигаться по плиткам"),
+                        ("E / Enter", "открыть выбранное"),
+                        ("Q", "вернуться к вкладкам")]),
+            ("МЫШЬ", [("Клик по плитке", "открыть"),
+                      ("Правый клик", "меню ярлыка"),
+                      ("Перетаскивание", "изменить порядок"),
+                      ("Колесо", "прокрутка")]),
+        ]
+        for title, rows in sections:
+            tk.Label(self.win, text=title, bg=self.BG, fg=self.DIM,
+                     font=small).place(x=pad, y=y)
+            y += 20
+            for keys, what in rows:
+                tk.Label(self.win, text=keys, bg=self.BG, fg=self.FG, font=bold,
+                         anchor="w").place(x=pad, y=y, width=170)
+                tk.Label(self.win, text=what, bg=self.BG, fg=self.DIM, font=font,
+                         anchor="w").place(x=pad + 180, y=y, width=w - pad * 2 - 180)
+                y += 22
+            y += 10
+
+        acc = cfg.get("accent", "#D8D8E0")
+        tk.Button(self.win, text="Готово", command=self.close, bg=acc, fg="#16161A",
+                  relief="flat", bd=0, activebackground=acc, activeforeground="#16161A",
+                  font=font).place(x=w - pad - 110, y=y, width=110, height=32)
+        y += 46
+
+        self.win.geometry("%dx%d+%d+%d" % (w, y, panel.sw // 2 - w // 2,
+                                           max(40, panel.sh // 2 - y // 2)))
+        self.win.update_idletasks()
+        apply_window_icon(self.win)
+        self.win.deiconify()
+        apply_window_icon(self.win)
+        self.win.after(120, lambda: apply_window_icon(self.win))
+
+        def _esc(_e=None):
+            self.close()
+            return "break"
+
+        self.win.bind("<Escape>", _esc)
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+        self.armed = False
+        self.was_down = False
+        self.picking = False
+        self.win.lift()
+        self.win.focus_force()
+
+    def _draw_switch(self, on):
+        acc = self.panel.cfg.get("accent", "#D8D8E0")
+        self.sw.delete("all")
+        self.sw.create_polygon(round_points(1, 1, 43, 21, 10), smooth=True,
+                               fill=acc if on else "#2E2E37", outline="")
+        cx = 33 if on else 11
+        self.sw.create_oval(cx - 8, 3, cx + 8, 19, fill="#16161A" if on else "#8E8E99",
+                            outline="")
+
+    def toggle_kbd(self, *_):
+        on = not bool(self.panel.cfg.get("keyboard", True))
+        self.panel.cfg["keyboard"] = on
+        save_config()
+        self._draw_switch(on)
+        if not on:
+            self.panel.kbd_mode = None
+            self.panel._kbd_clear()
+        log("keyboard -> %s" % on)
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- app
 class Panel:
     def __init__(self, root):
@@ -1347,7 +1478,7 @@ class Panel:
 
     def _on_key(self, e):
         """A/D — вкладки, E — вниз к плиткам, WASD — по плиткам, E — запуск, Q — назад."""
-        if not self.visible:
+        if not self.visible or not self.cfg.get("keyboard", True):
             return None
         ch = (getattr(e, "char", "") or "").lower()
         ks = (getattr(e, "keysym", "") or "").lower()
@@ -1630,13 +1761,13 @@ class Panel:
     def menu(self, event):
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label="Настройки…", command=self.open_settings)
+        m.add_command(label="Управление…", command=self.open_controls)
         m.add_command(label="Открыть папку панели", command=self.open_folder)
         m.add_separator()
         auto = autostart_state()
         m.add_command(label=("Автозапуск: включён  ✓" if auto else "Автозапуск: выключен"),
                       command=self.toggle_autostart)
         m.add_separator()
-        m.add_command(label="config.json", command=self.open_config)
         m.add_command(label="Перезапустить", command=self.restart)
         m.add_command(label="Выход", command=self.quit)
         self._popup(m, event.x_root, event.y_root)
@@ -1646,6 +1777,7 @@ class Panel:
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label="Открыть панель", command=self.toggle)
         m.add_command(label="Настройки…", command=self.open_settings)
+        m.add_command(label="Управление…", command=self.open_controls)
         m.add_command(label="Открыть папку панели", command=self.open_folder)
         m.add_separator()
         auto = autostart_state()
@@ -1671,35 +1803,52 @@ class Panel:
         except Exception as e:
             log("settings window: %r" % (e,))
 
-    def _watch_settings(self):
-        """Закрыть окно настроек кликом мимо (только если нажатие началось вне окна)."""
-        sw = getattr(self, "_settings", None)
-        if sw is None:
-            return
+    def open_controls(self):
         try:
-            if not sw.win.winfo_exists():
-                self._settings = None
-                return
-            down = left_button_down()
-            if not sw.armed:
-                if not down:
-                    sw.armed = True
-                sw.was_down = down
-                return
-            if self.menu_open or sw.picking or sw.win.grab_current() is not None:
-                sw.was_down = down
-                return
-            if down and not sw.was_down:
-                # новое нажатие: закрываем только если оно началось вне окна
-                x, y = cursor_pos()
-                wx, wy = sw.win.winfo_rootx(), sw.win.winfo_rooty()
-                ww, wh = sw.win.winfo_width(), sw.win.winfo_height()
-                if not (wx <= x <= wx + ww and wy <= y <= wy + wh):
-                    sw.close()
-                    self._settings = None
-            sw.was_down = down
+            cur = getattr(self, "_controls", None)
+            if cur is not None:
+                try:
+                    if cur.win.winfo_exists():
+                        cur.win.lift()
+                        cur.win.focus_force()
+                        return
+                except Exception:
+                    pass
+            self.hide()
+            self._controls = ControlsWindow(self)
         except Exception as e:
-            log("watch settings: %r" % (e,))
+            log("controls window: %r" % (e,))
+
+    def _watch_settings(self):
+        """Закрыть окна настроек/управления кликом мимо (если нажатие началось вне окна)."""
+        for attr in ("_settings", "_controls"):
+            sw = getattr(self, attr, None)
+            if sw is None:
+                continue
+            try:
+                if not sw.win.winfo_exists():
+                    setattr(self, attr, None)
+                    continue
+                down = left_button_down()
+                if not sw.armed:
+                    if not down:
+                        sw.armed = True
+                    sw.was_down = down
+                    continue
+                if self.menu_open or sw.picking or sw.win.grab_current() is not None:
+                    sw.was_down = down
+                    continue
+                if down and not sw.was_down:
+                    # новое нажатие: закрываем только если оно началось вне окна
+                    x, y = cursor_pos()
+                    wx, wy = sw.win.winfo_rootx(), sw.win.winfo_rooty()
+                    ww, wh = sw.win.winfo_width(), sw.win.winfo_height()
+                    if not (wx <= x <= wx + ww and wy <= y <= wy + wh):
+                        sw.close()
+                        setattr(self, attr, None)
+                sw.was_down = down
+            except Exception as e:
+                log("watch window: %r" % (e,))
 
     def item_menu(self, event, path):
         """Меню конкретного ярлыка: открыть / показать / закрепить / убрать."""
@@ -1789,15 +1938,6 @@ class Panel:
         except Exception as e:
             log("open folder: %r" % (e,))
 
-    def open_config(self):
-        if not os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, ensure_ascii=False, indent=2)
-        try:
-            os.startfile(CONFIG_PATH)
-        except Exception:
-            subprocess.Popen(["notepad.exe", CONFIG_PATH])
-
     def restart(self):
         log("restart requested")
         exe = sys.executable
@@ -1855,7 +1995,8 @@ class Panel:
             self._last_glue = now
             self._glue()
 
-        if self.visible or getattr(self, "_settings", None) is not None:
+        if (self.visible or getattr(self, "_settings", None) is not None
+                or getattr(self, "_controls", None) is not None):
             self._watch_settings()
 
             down = left_button_down()
