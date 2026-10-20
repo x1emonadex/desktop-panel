@@ -126,7 +126,7 @@ CFG = load_config()
 
 # ---------------------------------------------------------------- state
 def load_state():
-    st = {"pinned": [], "order": [], "view": "auto"}
+    st = {"pinned": [], "order": [], "view": "auto", "groups": [], "next_gid": 1}
     try:
         if os.path.exists(STATE_PATH):
             with open(STATE_PATH, "r", encoding="utf-8") as f:
@@ -142,6 +142,76 @@ def save_state(st):
             json.dump(st, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log("state save: %r" % (e,))
+
+
+def ask_text(panel, title, prompt, initial=""):
+    """Небольшое тёмное окно ввода — имя группы."""
+    win = tk.Toplevel(panel.root)
+    win.withdraw()
+    win.title(title)
+    win.configure(bg="#16161A")
+    win.resizable(False, False)
+    try:
+        win.iconbitmap(os.path.join(APP_DIR, "app.ico"))
+    except Exception:
+        pass
+    font = panel.font
+    tk.Label(win, text=prompt, bg="#16161A", fg="#E7E7EC",
+             font=font).place(x=16, y=12)
+    var = tk.StringVar(value=initial)
+    ent = tk.Entry(win, textvariable=var, bg="#1E1E23", fg="#E7E7EC",
+                   insertbackground="#E7E7EC", relief="flat", bd=6, font=font)
+    ent.place(x=16, y=38, width=328, height=28)
+    res = {"v": None}
+
+    def ok(_e=None):
+        v = var.get().strip()
+        if v:
+            res["v"] = v
+        win.destroy()
+
+    tk.Button(win, text="ОК", command=ok, bg="#D8D8E0", fg="#16161A", relief="flat",
+              bd=0, font=font, activebackground="#FFFFFF").place(x=250, y=78, width=94, height=28)
+    tk.Button(win, text="Отмена", command=win.destroy, bg="#2E2E37", fg="#E7E7EC",
+              relief="flat", bd=0, font=font, activebackground="#3A3A45",
+              activeforeground="#FFFFFF").place(x=16, y=78, width=94, height=28)
+
+    gx, gy, gw, _gh = panel.panel_geo
+    win.geometry("360x120+%d+%d" % (max(0, gx + gw // 2 - 180), max(0, gy - 150)))
+    win.deiconify()
+    win.lift()
+    try:
+        win.attributes("-topmost", True)
+    except Exception:
+        pass
+    ent.focus_set()
+    ent.select_range(0, "end")
+    win.bind("<Return>", ok)
+
+    def _esc(_e=None):
+        win.destroy()
+        return "break"
+
+    win.bind("<Escape>", _esc)
+    panel.dialog_open = True
+    try:
+        win.grab_set()
+    except Exception:
+        pass
+
+    def _focus():
+        try:
+            win.focus_force()
+            ent.focus_force()
+        except Exception:
+            pass
+
+    _focus()
+    win.after(80, _focus)
+    win.after(250, _focus)
+    win.wait_window()
+    panel.dialog_open = False
+    return res["v"]
 
 
 # ---------------------------------------------------------------- autostart
@@ -878,6 +948,7 @@ class Panel:
     def _glue(self):
         """Держать ручку на уровне рабочего стола: выше обоев, но ниже всех программ."""
         try:
+            self._ensure_windows()
             hwnd = int(self.trigger.wm_frame(), 16)
             ex = user32.GetWindowLongW(hwnd, -20)
             user32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x00000080)  # NOACTIVATE|TOOLWINDOW
@@ -982,20 +1053,32 @@ class Panel:
         alive = set(n for _p, n in items)
         pinned = set(self.state.get("pinned", [])) & alive
         order = [n for n in self.state.get("order", []) if n in alive]
+        groups = self.state.get("groups") or []
         # подчищаем state, если в нём остались имена удалённых ярлыков
-        if pinned != set(self.state.get("pinned", [])) or len(order) != len(self.state.get("order", [])):
+        dirty = (pinned != set(self.state.get("pinned", []))
+                 or len(order) != len(self.state.get("order", [])))
+        if dirty:
             self.state["pinned"] = [n for n in self.state.get("pinned", []) if n in alive]
             self.state["order"] = order
+        for g in groups:
+            cur = g.get("items") or []
+            keep = [n for n in cur if n in alive]
+            if keep != cur:
+                g["items"] = keep
+                dirty = True
+        if dirty:
             save_state(self.state)
 
         oidx = {n: i for i, n in enumerate(order)}
         items.sort(key=lambda t: (oidx.get(t[1], 10 ** 6), t[1].lower()))
         self.all_names = [n for _p, n in items]
 
-        show_tabs = bool(pinned) or len(items) > cols
+        show_tabs = bool(pinned) or bool(groups) or len(items) > cols
+        self.tab_keys = ((["pinned"] if pinned else []) + ["all"]
+                         + ["g%d" % g.get("id", 0) for g in groups]) if show_tabs else []
         if not show_tabs:
             self.view = "all"
-        elif self.view not in ("pinned", "all"):
+        elif self.view not in self.tab_keys:
             self.view = "pinned" if pinned else "all"
         if self.view == "pinned" and not pinned:
             self.view = "all"
@@ -1005,12 +1088,24 @@ class Panel:
             self.kbd_mode = "tiles"
             self.kbd_i = 0
 
-        visible = [it for it in items if self.view == "all" or it[1] in pinned]
+        if self.view == "pinned":
+            visible = [it for it in items if it[1] in pinned]
+        elif self.view == "all":
+            visible = items
+        else:
+            names = set()
+            for g in groups:
+                if "g%d" % g.get("id", 0) == self.view:
+                    names = set(g.get("items") or [])
+                    break
+            visible = [it for it in items if it[1] in names]
         entries = list(visible) + [("__add__", "Добавить")]
 
         n = len(entries)
         rows = (n + cols - 1) // cols
-        content_w = cols * tw + (cols - 1) * gap
+        tiles_w = cols * tw + (cols - 1) * gap
+        tab_w = self._tabs_width(self._tabs_list(len(pinned), len(items))) if show_tabs else 0
+        content_w = min(max(tiles_w, tab_w), max(240, self.sw - 120))
         self.content_h = rows * th + max(0, rows - 1) * gap
 
         for i, (path, name) in enumerate(entries):
@@ -1102,11 +1197,33 @@ class Panel:
         if self.kbd_mode == "tiles":
             self._kbd_draw()
 
+    def _tabs_list(self, n_pinned, n_all):
+        """[(view_key, подпись, счётчик)] — закреплённые, все и пользовательские группы."""
+        tabs = []
+        if n_pinned:
+            tabs.append(("pinned", "Закреплённые", n_pinned))
+        tabs.append(("all", "Все", n_all))
+        for g in self.state.get("groups") or []:
+            name = (g.get("name") or "Группа").strip() or "Группа"
+            if len(name) > 16:
+                name = name[:15] + "…"
+            cnt = len([n for n in (g.get("items") or []) if n in self.all_names])
+            tabs.append(("g%d" % g.get("id", 0), name, cnt))
+        return tabs
+
+    def _tabs_width(self, tabs):
+        total = 2 + 24          # отступ слева + кнопка «+»
+        for _key, label, cnt in tabs:
+            w = self.font.measure(label)
+            if cnt:
+                w += 7 + max(20, self.font_small.measure(str(cnt)) + 14)
+            total += w + 22
+        return total
+
     def _draw_tabs(self, width, n_pinned, n_all):
         c = self.cfg
-        tabs = [("pinned", "Закреплённые", n_pinned), ("all", "Все", n_all)]
         x = 2
-        for key, label, cnt in tabs:
+        for key, label, cnt in self._tabs_list(n_pinned, n_all):
             active = (self.view == key)
             color = c["text_color"] if active else c["text_dim"]
             tag = "tab_" + key
@@ -1128,11 +1245,90 @@ class Panel:
                 self.tabcan.create_line(bb[0], 26, end, 26, fill=c["accent"], width=2,
                                         tags=(tag,))
             self.tabcan.tag_bind(tag, "<Button-1>", lambda e, k=key: self.set_view(k))
+            self.tabcan.tag_bind(tag, "<Button-3>", lambda e, k=key: self.tab_menu(e, k))
             self.tabcan.tag_bind(tag, "<Enter>",
                                  lambda e: self.tabcan.config(cursor="hand2"))
             self.tabcan.tag_bind(tag, "<Leave>",
                                  lambda e: self.tabcan.config(cursor=""))
             x = end + 22
+
+        # «+» — создать группу
+        px = x - 4
+        self.tabcan.create_polygon(round_points(px, 3, px + 22, 25, 8), smooth=True,
+                                   fill=c["tile_hover"], outline=c["border_color"],
+                                   width=1, tags=("tab_add",))
+        self.tabcan.create_text(px + 11, 13, text="+", fill=c["accent"],
+                                font=(c["font"], 11), tags=("tab_add",))
+        self.tabcan.tag_bind("tab_add", "<Button-1>", lambda e: self.new_group())
+        self.tabcan.tag_bind("tab_add", "<Button-3>", lambda e: self.tab_menu(e, "add"))
+        self.tabcan.tag_bind("tab_add", "<Enter>",
+                             lambda e: self.tabcan.config(cursor="hand2"))
+        self.tabcan.tag_bind("tab_add", "<Leave>",
+                             lambda e: self.tabcan.config(cursor=""))
+
+    # ------------------------------------------------------------ группы
+    def _group_by_id(self, gid):
+        for g in self.state.get("groups") or []:
+            if int(g.get("id", -1)) == int(gid):
+                return g
+        return None
+
+    def new_group(self, add_name=None):
+        name = ask_text(self, "Новая группа", "Название группы:")
+        if not name:
+            return
+        gid = int(self.state.get("next_gid", 1) or 1)
+        groups = self.state.setdefault("groups", [])
+        groups.append({"id": gid, "name": name,
+                       "items": [add_name] if add_name else []})
+        self.state["next_gid"] = gid + 1
+        save_state(self.state)
+        self.view = "g%d" % gid
+        self.build_tiles()
+
+    def rename_group(self, gid):
+        g = self._group_by_id(gid)
+        if not g:
+            return
+        name = ask_text(self, "Переименовать группу", "Название группы:", g.get("name", ""))
+        if not name:
+            return
+        g["name"] = name
+        save_state(self.state)
+        self.build_tiles()
+
+    def delete_group(self, gid):
+        if not self._group_by_id(gid):
+            return
+        self.state["groups"] = [x for x in (self.state.get("groups") or [])
+                                if int(x.get("id", -1)) != int(gid)]
+        if self.view == "g%d" % gid:
+            self.view = "all"
+        save_state(self.state)
+        self.build_tiles()
+
+    def toggle_in_group(self, gid, name):
+        g = self._group_by_id(gid)
+        if not g:
+            return
+        items = list(g.get("items") or [])
+        if name in items:
+            items.remove(name)
+        else:
+            items.append(name)
+        g["items"] = items
+        save_state(self.state)
+        self.build_tiles()
+
+    def tab_menu(self, event, key):
+        m = tk.Menu(self.root, tearoff=0)
+        if key.startswith("g") and key != "add":
+            gid = int(key[1:])
+            m.add_command(label="Переименовать…", command=lambda: self.rename_group(gid))
+            m.add_command(label="Удалить группу", command=lambda: self.delete_group(gid))
+            m.add_separator()
+        m.add_command(label="Новая группа…", command=lambda: self.new_group())
+        self._popup(m, event.x_root, event.y_root)
 
     def set_view(self, key):
         self.view = key
@@ -1202,8 +1398,8 @@ class Panel:
         return "break"
 
     def _kbd_tab(self, step):
-        keys = ["pinned", "all"]
-        i = keys.index(self.view) if self.view in keys else 1
+        keys = getattr(self, "tab_keys", None) or ["pinned", "all"]
+        i = keys.index(self.view) if self.view in keys else 0
         self.set_view(keys[(i + step) % len(keys)])
 
     def _kbd_clear(self):
@@ -1357,9 +1553,37 @@ class Panel:
             self.show()
         self.root.after(30, self._glue)
 
+    def _ensure_windows(self):
+        """Если Windows уничтожила окно (сброс DPI, перезапуск проводника) — пересоздать."""
+        try:
+            alive = bool(self.panel.winfo_exists() and self.tiles.winfo_exists()
+                         and self.tabcan.winfo_exists())
+        except Exception:
+            alive = False
+        if not alive:
+            try:
+                self.panel.destroy()
+            except Exception:
+                pass
+            self._build_panel()
+            self.visible = False
+            log("окно панели пересоздано")
+        try:
+            tok = bool(self.trigger.winfo_exists() and self.tcan.winfo_exists())
+        except Exception:
+            tok = False
+        if not tok:
+            try:
+                self.trigger.destroy()
+            except Exception:
+                pass
+            self._build_trigger()
+            log("окно ручки пересоздано")
+
     def show(self):
         if self.visible:
             return
+        self._ensure_windows()
         # при открытии всегда показываем «Закреплённые», если там что-то есть
         self.view = "pinned" if self.state.get("pinned") else "all"
         self.kbd_mode = "tabs"       # открылись на вкладках: A/D переключают
@@ -1397,7 +1621,10 @@ class Panel:
         self.visible = False
         self.kbd_mode = None
         self._kbd_clear()
-        self.panel.withdraw()
+        try:
+            self.panel.withdraw()
+        except Exception as e:
+            log("hide: %r" % (e,))
 
     # ------------------------------------------------------------ menu
     def menu(self, event):
@@ -1488,6 +1715,17 @@ class Panel:
         m.add_separator()
         m.add_command(label=("Открепить" if pinned else "Закрепить"),
                       command=lambda: self.toggle_pin(name))
+        sub = tk.Menu(m, tearoff=0)
+        groups = self.state.get("groups") or []
+        for g in groups:
+            inside = name in (g.get("items") or [])
+            label = ("✓ " if inside else "     ") + (g.get("name") or "Группа")
+            sub.add_command(label=label,
+                            command=lambda gid=g.get("id", 0), nm=name: self.toggle_in_group(gid, nm))
+        if groups:
+            sub.add_separator()
+        sub.add_command(label="Новая группа…", command=lambda nm=name: self.new_group(nm))
+        m.add_cascade(label="Добавить в группу", menu=sub)
         m.add_separator()
         m.add_command(label="Убрать с панели (в корзину)", command=lambda: self.remove_item(path))
         self._popup(m, event.x_root, event.y_root)
@@ -1623,7 +1861,8 @@ class Panel:
             down = left_button_down()
             new_press = down and not self._was_down
             self._was_down = down
-            if self.visible and not self.menu_open and new_press:
+            if (self.visible and not self.menu_open
+                    and not getattr(self, "dialog_open", False) and new_press):
                 x, y = cursor_pos()
                 px, py, pw, ph = self.panel_geo
                 tx, ty, tw, th = self.trigger_geo
