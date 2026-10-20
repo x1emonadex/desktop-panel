@@ -820,6 +820,11 @@ class Panel:
         self._ticks = 0
         self._was_down = False
         self._last_glue = 0
+        # управление с клавиатуры: "tabs" | "tiles" | None
+        self.kbd_mode = None
+        self.kbd_i = 0
+        self.show_tabs = False
+        self._tab_info = (0, 0, 0)
 
         self.font = tkfont.Font(family=self.cfg["font"], size=self.cfg["font_size"])
         self.font_small = tkfont.Font(family=self.cfg["font"], size=max(6, self.cfg["font_size"] - 1))
@@ -940,6 +945,8 @@ class Panel:
         self.tiles.bind("<B1-Motion>", self._on_drag)
         self.tiles.bind("<ButtonRelease-1>", self._on_release)
         self.panel.bind("<Escape>", lambda e: self.hide())
+        self.panel.bind("<Key>", self._on_key)
+        self.panel.bind("<MouseWheel>", self._wheel)
 
     # ------------------------------------------------------------ items
     def scan(self):
@@ -992,6 +999,11 @@ class Panel:
             self.view = "pinned" if pinned else "all"
         if self.view == "pinned" and not pinned:
             self.view = "all"
+        self.show_tabs = show_tabs
+        if not show_tabs and self.kbd_mode == "tabs":
+            # вкладок нет — сразу работаем по плиткам
+            self.kbd_mode = "tiles"
+            self.kbd_i = 0
 
         visible = [it for it in items if self.view == "all" or it[1] in pinned]
         entries = list(visible) + [("__add__", "Добавить")]
@@ -1054,8 +1066,9 @@ class Panel:
 
         # вкладки
         tab_h = 30 if show_tabs else 0
+        self._tab_info = (content_w, len(pinned), len(items))
         if show_tabs:
-            self._draw_tabs(content_w, len(pinned), len(items))
+            self._draw_tabs(*self._tab_info)
 
         # размеры панели
         w = content_w + pad * 2
@@ -1085,6 +1098,9 @@ class Panel:
         self.tiles.configure(scrollregion=(0, 0, content_w, max(self.content_h, visible_h)))
         self.tiles.place(x=pad, y=top, width=content_w, height=visible_h)
         self.tiles.yview_moveto(0)
+        self.view_h = visible_h
+        if self.kbd_mode == "tiles":
+            self._kbd_draw()
 
     def _draw_tabs(self, width, n_pinned, n_all):
         c = self.cfg
@@ -1121,6 +1137,108 @@ class Panel:
     def set_view(self, key):
         self.view = key
         self.build_tiles()
+
+    # ------------------------------------------------------------ клавиатура
+    KEYMAP = {
+        "a": "left", "ф": "left", "cyrillic_ef": "left", "left": "left",
+        "d": "right", "в": "right", "cyrillic_ve": "right", "right": "right",
+        "w": "up", "ц": "up", "cyrillic_tse": "up", "up": "up",
+        "s": "down", "ы": "down", "cyrillic_yeru": "down", "down": "down",
+        "e": "enter", "у": "enter", "cyrillic_u": "enter",
+        "return": "enter", "kp_enter": "enter",
+        "q": "back", "й": "back", "cyrillic_shorti": "back",
+    }
+
+    def _on_key(self, e):
+        """A/D — вкладки, E — вниз к плиткам, WASD — по плиткам, E — запуск, Q — назад."""
+        if not self.visible:
+            return None
+        ch = (getattr(e, "char", "") or "").lower()
+        ks = (getattr(e, "keysym", "") or "").lower()
+        action = self.KEYMAP.get(ch) or self.KEYMAP.get(ks)
+        if not action:
+            return None
+
+        if self.kbd_mode == "tabs":
+            if action in ("left", "right"):
+                if self.show_tabs:
+                    self._kbd_tab(-1 if action == "left" else 1)
+            elif action in ("down", "enter"):
+                self.kbd_mode = "tiles"
+                self.kbd_i = 0
+                self._kbd_draw()
+            elif action == "back":
+                self.hide()
+            return "break"
+
+        if self.kbd_mode != "tiles":
+            return None
+
+        cols = max(1, self.cfg["columns"])
+        n = len(self.tile_map)
+        if action == "enter":
+            ent = self.tile_map.get("it%d" % self.kbd_i)
+            if ent:
+                self._activate(ent[0])
+            return "break"
+        if action == "back":
+            if self.show_tabs:
+                self.kbd_mode = "tabs"
+                self._kbd_clear()
+            else:
+                self.hide()
+            return "break"
+        if action == "left":
+            self.kbd_i -= 1
+        elif action == "right":
+            self.kbd_i += 1
+        elif action == "up":
+            self.kbd_i -= cols
+        elif action == "down":
+            self.kbd_i += cols
+        if n:
+            self.kbd_i = max(0, min(self.kbd_i, n - 1))
+        self._kbd_draw()
+        return "break"
+
+    def _kbd_tab(self, step):
+        keys = ["pinned", "all"]
+        i = keys.index(self.view) if self.view in keys else 1
+        self.set_view(keys[(i + step) % len(keys)])
+
+    def _kbd_clear(self):
+        try:
+            self.tiles.delete("kbfocus")
+        except Exception:
+            pass
+
+    def _kbd_draw(self):
+        """Рамка вокруг плитки, выбранной с клавиатуры."""
+        self._kbd_clear()
+        if self.kbd_mode != "tiles" or not self.tile_map:
+            return
+        c = self.cfg
+        tw, th, gap = c["tile_width"], c["tile_height"], c["gap"]
+        cols = max(1, c["columns"])
+        self.kbd_i = max(0, min(self.kbd_i, len(self.tile_map) - 1))
+        r, col = divmod(self.kbd_i, cols)
+        x = col * (tw + gap)
+        y = r * (th + gap)
+        self.tiles.create_polygon(
+            round_points(x + 1, y + 1, x + tw - 1, y + th - 1, 12), smooth=True,
+            fill="", outline=c["accent"], width=2, tags=("kbfocus",))
+        self._ensure_visible(self.kbd_i, y)
+
+    def _ensure_visible(self, i, y):
+        c = self.cfg
+        tw, th, gap = c["tile_width"], c["tile_height"], c["gap"]
+        total = max(1, self.content_h)
+        view_h = max(1, getattr(self, "view_h", 0) or self.tiles.winfo_height())
+        top = self.tiles.canvasy(0)
+        if y < top:
+            self.tiles.yview_moveto(y / total)
+        elif y + th > top + view_h:
+            self.tiles.yview_moveto((y + th - view_h) / total)
 
     # ------------------------------------------------------------ drag & drop
     def _tile_index_at(self, event):
@@ -1244,6 +1362,8 @@ class Panel:
             return
         # при открытии всегда показываем «Закреплённые», если там что-то есть
         self.view = "pinned" if self.state.get("pinned") else "all"
+        self.kbd_mode = "tabs"       # открылись на вкладках: A/D переключают
+        self.kbd_i = 0
         self.build_tiles()
         self.visible = True
         x, y, w, h = self.panel_geo
@@ -1275,6 +1395,8 @@ class Panel:
         if not self.visible:
             return
         self.visible = False
+        self.kbd_mode = None
+        self._kbd_clear()
         self.panel.withdraw()
 
     # ------------------------------------------------------------ menu
